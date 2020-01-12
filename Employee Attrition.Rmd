@@ -1,0 +1,648 @@
+---
+title: "HR Analytics - Attrition"
+output: github_document
+---
+
+## Problem Statement
+
+A large company named XYZ, employs, at any given point of time, around 4000 employees. However, every year, around 15% of its employees leave the company and need to be replaced with the talent pool available in the job market. The management believes that this level of attrition (employees leaving, either on their own or because they got fired) is bad for the company, because of the following reasons -
+
+1. The former employees’ projects get delayed, which makes it difficult to meet timelines, resulting in a reputation loss among consumers and partners
+2. A sizeable department has to be maintained, for the purposes of recruiting new talent
+3. More often than not, the new employees have to be trained for the job and/or given time to acclimatise themselves to the company
+
+## Aim
+
+In order to curb attrition
+
+1. Probability of attrition using Logistic Regression
+2. They want to know which of these variables is most important and needs to be addressed right away.
+
+########################################################
+## Data Understanding
+
+Loading the libraries to be used
+
+```{r}
+library(MASS)
+library(car)
+library(e1071)
+library(caret)
+library(ggplot2)
+library(cowplot)
+library(caTools)
+```
+
+Now Loading the datasets
+
+```{r}
+employee_survey <- read.csv("employee_survey_data.csv", stringsAsFactors = FALSE)
+general_data <- read.csv("general_data.csv", stringsAsFactors = FALSE)
+in_time <- read.csv("in_time.csv", stringsAsFactors = FALSE)
+manager_survey <- read.csv("manager_survey_data.csv", stringsAsFactors = FALSE)
+out_time <- read.csv("out_time.csv", stringsAsFactors = FALSE)
+
+```
+
+Now lets explore the structure of the datasets
+
+```{r}
+str(employee_survey)
+print("-----------------")
+str(general_data)
+print("-----------------")
+str(in_time)
+print("-----------------")
+str(manager_survey)
+print("-----------------")
+str(out_time)
+```
+
+
+Handling in_time and out_time datasets
+
+Removing the Columns with all NA values.
+
+```{r}
+
+cols <- names(which(sapply(in_time, function(x) all(is.na(x)))))
+in_time <- in_time[, !(names(in_time) %in% cols)]
+cols_1 <- names(which(sapply(out_time, function(x) all(is.na(x)))))
+out_time <- out_time[, !(names(out_time) %in% cols_1)]
+
+```
+
+
+convert in_time and out_time columns to date format. The final values will contain seconds passed from 01-01-1970 till the date into consideration hence, expect large values
+
+```{r}
+
+change_to_date <- function(data){
+  
+  data[,2:ncol(data)] <- as.data.frame(sapply(
+                             data[, 2:ncol(data)], 
+                             function(x){
+                                 as.POSIXct(strptime(x, format = "%Y-%m-%d %H:%M:%S"))
+                             }
+                         ))
+  
+  return(data)
+}
+
+in_time <- change_to_date(in_time)
+out_time <- change_to_date(out_time)
+```
+
+
+Now let us calculate the time difference of each employee
+
+```{r}
+# create new empty data frame which is going to contain time differences in seconds
+time_difference <- matrix(nrow = nrow(in_time), ncol = ncol(in_time))
+time_difference <- as.data.frame(time_difference)
+
+# calculate the time for which an employee has worked for each day (in hours)
+for(col_number in 2:ncol(in_time)){  # do not include the 1st column which belongs to employeeID
+  
+  # get time difference in for each employee for a particular day in seconds
+  time_difference[, col_number] <- out_time[, col_number] - in_time[, col_number]
+  
+  # convert to seconds difference to hours
+  time_difference[, col_number] <- time_difference[, col_number]/3600
+  
+}
+
+```
+
+Average working hours of each employee
+
+```{r}
+
+avg_time <- apply(time_difference, 1, mean, na.rm = T)
+work_hours <- data.frame(EmployeeID = general_data$EmployeeID, AverageWorkTime = avg_time)
+
+```
+
+
+Now let us merge the data
+
+```{r}
+hr_analytics <- merge(work_hours, general_data, by = "EmployeeID", all = FALSE)
+hr_analytics <- merge(hr_analytics, employee_survey, by ="EmployeeID", all = FALSE)
+hr_analytics <- merge(hr_analytics, manager_survey, by ="EmployeeID", all = FALSE)
+str(hr_analytics)
+```
+
+################################################################
+
+### Data Preparation & Exploratory Data Analysis
+
+Finding Missing Values in the dataset
+
+```{r}
+names(which(sapply(hr_analytics, function(x) any(is.na(x)))))
+
+sum(is.na(hr_analytics$NumCompaniesWorked))
+sum(is.na(hr_analytics$EnvironmentSatisfaction))
+sum(is.na(hr_analytics$TotalWorkingYears))
+sum(is.na(hr_analytics$JobSatisfaction))
+sum(is.na(hr_analytics$WorkLifeBalance))
+
+# Removing the missing values as it is very small
+hr_analytics <- na.omit(hr_analytics)
+
+```
+
+Coverting the factor variables to factors:
+
+```{r}
+factor_variables <- c("Attrition", "BusinessTravel", "Department", "Education",
+                      "EducationField", "Gender", "JobLevel", "JobRole", 
+                      "MaritalStatus", "StockOptionLevel", 
+                      "EnvironmentSatisfaction", "JobSatisfaction", 
+                      "WorkLifeBalance", "JobInvolvement", "PerformanceRating")
+
+# Removing unwanted columns
+hr_analytics[, c("EmployeeCount", "Over18", "StandardHours")] <- NULL
+
+hr_analytics_fact <- hr_analytics[,factor_variables]
+#hr_analytics_int <- hr_analytics[, !(factor_variables)]
+
+hr_analytics[,factor_variables] <- data.frame(sapply(hr_analytics_fact, function(x) factor(x)))
+
+hr_analytics_fact <- data.frame(sapply(hr_analytics_fact, function(x) factor(x)))
+str(hr_analytics_fact)
+```
+
+
+Converting integer class to numeric type
+
+```{r}
+INTEGER_VARIABLES <- lapply(hr_analytics, class) == "integer"
+hr_analytics[, INTEGER_VARIABLES] <- lapply(hr_analytics[, INTEGER_VARIABLES], as.numeric)
+sapply(hr_analytics,class)
+```
+
+
+
+####################################################
+## Standardization
+
+Creating a dataframe of numerical features
+```{r}
+
+INTEGER_VARIABLES <- lapply(hr_analytics, class) == "integer" | lapply(hr_analytics, class) == "numeric"
+hr_analytics_int <- hr_analytics[, INTEGER_VARIABLES]
+
+# Scaling the data
+hr_analytics_int <- data.frame(sapply(hr_analytics_int, function(x) scale(x)))
+```
+
+Creating dummy variables
+```{r}
+dummies<- data.frame(sapply(hr_analytics_fact, 
+                            function(x) data.frame(model.matrix(~x-1,data=hr_analytics_fact))[,-1]))
+```
+
+Converting target variable as numeric
+```{r}
+dummies$Attrition <- as.numeric(dummies$Attrition)
+```
+
+Final Dataset for model building
+```{r}
+attrition_final <- cbind(hr_analytics_int, dummies)
+```
+
+######################################################
+## Splitting the data into train and test
+
+```{r}
+set.seed(100)
+
+indices <- sample.split(attrition_final$Attrition, SplitRatio = 0.7)
+
+train <- attrition_final[indices,]
+
+test <- attrition_final[!(indices),]
+```
+
+####################################################
+## Logistic Regression
+
+Creating the first model
+```{r}
+model_1 <- glm(Attrition~ ., data = train, family = "binomial" )
+summary(model_1)
+```
+
+Here we can see the coeficient values of all the features. We have AIC value of 2118.3, In our model we can see that we have lot of features with negligible values, this means we can neglect these variables from our analysis as they are not significant.
+
+Feature Selection using StepAIC function
+```{r}
+model_2 <- stepAIC(model_1, direction = "both")
+# summary(model_2)
+```
+
+Now eliminating features using VIF and p-value
+```{r}
+vif(model_2)
+```
+
+Eliminating EducationField.xMedical
+
+```{r}
+model_3 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    BusinessTravel.xTravel_Rarely + Education.x5 + EducationField.xLife.Sciences + 
+    EducationField.xMarketing + EducationField.xOther + 
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive + MaritalStatus.xMarried + 
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x2 + WorkLifeBalance.x3 + WorkLifeBalance.x4 + 
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_3)
+#vif(model_3)
+```
+
+removing BusinessTravel.xTravel_Rarely
+
+```{r}
+model_4 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 + EducationField.xLife.Sciences + 
+    EducationField.xMarketing + EducationField.xOther + 
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive + MaritalStatus.xMarried + 
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x2 + WorkLifeBalance.x3 + WorkLifeBalance.x4 + 
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_4)
+#vif(model_4)
+```
+
+removing WorkLifeBalance.x2
+
+```{r}
+model_5 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 + EducationField.xLife.Sciences + 
+    EducationField.xMarketing + EducationField.xOther + 
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive + MaritalStatus.xMarried + 
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 + WorkLifeBalance.x4 + 
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_5)
+#vif(model_5)
+```
+
+removing MaritalStatus.xMarried
+
+```{r}
+model_6 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 + EducationField.xLife.Sciences + 
+    EducationField.xMarketing + EducationField.xOther + 
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 + WorkLifeBalance.x4 + 
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_6)
+#vif(model_6)
+```
+
+removing EducationField.xLife.Sciences
+
+```{r}
+model_7 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 +  
+    EducationField.xMarketing + EducationField.xOther + 
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 + WorkLifeBalance.x4 + 
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_7)
+```
+
+removing EducationField.xMarketing
+
+```{r}
+model_8 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 +  
+    EducationField.xOther + 
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 + WorkLifeBalance.x4 + 
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_8)
+```
+
+removing WorkLifeBalance.x4
+
+```{r}
+model_8 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 +  
+    EducationField.xOther + 
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_8)
+```
+
+removing EducationField.xOther
+```{r}
+model_9 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 +  
+    EducationField.xTechnical.Degree + JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+# summary(model_9)
+```
+
+removing EducationField.xTechnical.Degree
+```{r}
+model_10 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 +  
+    JobLevel.x2 + JobLevel.x5 + 
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_10)
+```
+
+removing JobLevel.x5 
+```{r}
+model_11 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 +  
+    JobLevel.x2 +  
+    JobRole.xHuman.Resources + JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_11)
+```
+
+removing JobRole.xHuman.Resources
+```{r}
+model_12 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    Education.x5 +  
+    JobLevel.x2 +  
+    JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_12)
+```
+
+removing Education.x5
+
+```{r}
+model_13 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    JobLevel.x2 +  
+    JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + StockOptionLevel.x1 + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_13)
+```
+
+removing StockOptionLevel.x1
+
+```{r}
+model_14 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    JobLevel.x2 +  
+    JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director + JobRole.xSales.Executive +  
+    MaritalStatus.xSingle + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_14)
+```
+
+removing JobRole.xSales.Executive
+```{r}
+model_15 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    JobLevel.x2 +  
+    JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director +   
+    MaritalStatus.xSingle + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_15)
+```
+
+remove JobLevel.x2 
+```{r}
+model_16 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    JobRole.xManager + JobRole.xManufacturing.Director + 
+    JobRole.xResearch.Director +   
+    MaritalStatus.xSingle + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_16)
+```
+
+removing JobRole.xResearch.Director
+```{r}
+model_17 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    JobRole.xManager + JobRole.xManufacturing.Director + 
+    MaritalStatus.xSingle + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3 +  
+    JobInvolvement.x3, family = "binomial", data = train)
+
+#summary(model_17)
+```
+
+removing JobInvolvement.x3
+
+```{r}
+model_18 <- glm(formula = Attrition ~ AverageWorkTime + Age + NumCompaniesWorked + 
+    TotalWorkingYears + TrainingTimesLastYear + YearsSinceLastPromotion + 
+    YearsWithCurrManager + BusinessTravel.xTravel_Frequently + 
+    JobRole.xManager + JobRole.xManufacturing.Director + 
+    MaritalStatus.xSingle + EnvironmentSatisfaction.x2 + 
+    EnvironmentSatisfaction.x3 + EnvironmentSatisfaction.x4 + 
+    JobSatisfaction.x2 + JobSatisfaction.x3 + JobSatisfaction.x4 + 
+    WorkLifeBalance.x3, family = "binomial", data = train)
+
+summary(model_18)
+```
+
+Now all the features have a significant value hence we consider this as our final model
+
+```{r}
+final_model <- model_18
+```
+
+#######################################################
+## Prediction
+
+```{r}
+test_pred <- predict(final_model, type = "response", newdata = test[,-1])
+summary(test_pred)
+```
+
+We have predicted the probability of employee attrition 
+
+Now let us cut the probability at 50% for employee attrition at 50%
+
+```{r}
+test_pred_attr <- factor(ifelse(test_pred >= 0.50, "Yes", "No"))
+test_actual_attr <- factor(ifelse(test$Attrition == 1, "Yes", "No"))
+
+test_conf <- confusionMatrix(test_pred_attr, test_actual_attr, positive = "Yes")
+test_conf
+```
+
+As checked our model is predicting with 85% accuracy.
+It is able to predict the Specificity with 97% but sensitivity prediction is very low at 29%
+
+Need to determine better cutoff probability.
+```{r}
+perform_fn <- function(cutoff) 
+{
+  predicted_attr <- factor(ifelse(test_pred >= cutoff, "Yes", "No"))
+  conf <- confusionMatrix(predicted_attr, test_actual_attr, positive = "Yes")
+  acc <- conf$overall[1]
+  sens <- conf$byClass[1]
+  spec <- conf$byClass[2]
+  out <- t(as.matrix(c(sens, spec, acc))) 
+  colnames(out) <- c("sensitivity", "specificity", "accuracy")
+  return(out)
+}
+
+# Creating cutoff values from 0.003575 to 0.812100 for plotting and initiallizing a matrix of 100 X 3.
+
+# Summary of test probability
+
+summary(test_pred)
+
+s = seq(.01,.80,length=100)
+
+OUT = matrix(0,100,3)
+
+
+for(i in 1:100)
+{
+  OUT[i,] = perform_fn(s[i])
+} 
+
+
+plot(s, OUT[,1],xlab="Cutoff",ylab="Value",cex.lab=1.5,cex.axis=1.5,ylim=c(0,1),type="l",lwd=2,axes=FALSE,col=2)
+axis(1,seq(0,1,length=5),seq(0,1,length=5),cex.lab=1.5)
+axis(2,seq(0,1,length=5),seq(0,1,length=5),cex.lab=1.5)
+lines(s,OUT[,2],col="darkgreen",lwd=2)
+lines(s,OUT[,3],col=4,lwd=2)
+box()
+legend(0,.50,col=c(2,"darkgreen",4,"darkred"),lwd=c(2,2,2,2),c("Sensitivity","Specificity","Accuracy"))
+
+
+```
+
+Let us select a cut off value of 0.20
+```{r}
+test_pred_attr <- factor(ifelse(test_pred >= 0.20, "Yes", "No"))
+test_actual_attr <- factor(ifelse(test$Attrition == 1, "Yes", "No"))
+
+test_conf <- confusionMatrix(test_pred_attr, test_actual_attr, positive = "Yes")
+test_conf
+```
+
+After making adjustment now our model is able to predic correctly 79% time
+Now we can observe that Sensitivity and Specificity are both more than 75%
